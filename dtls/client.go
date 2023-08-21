@@ -2,6 +2,7 @@ package dtls
 
 import (
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/pion/dtls/v2"
@@ -31,6 +32,53 @@ var DefaultConfig = func() udpClient.Config {
 	return cfg
 }()
 
+// packetConn wraps a net.Conn with methods that satisfy net.PacketConn.
+type packetConn struct {
+	conn net.Conn
+}
+
+// FromConn converts a net.Conn into a net.PacketConn.
+func FromConn(conn net.Conn) net.PacketConn {
+	return &packetConn{conn}
+}
+
+// ReadFrom reads from the underlying net.Conn and returns its remote address.
+func (cp *packetConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, err := cp.conn.Read(b)
+	return n, cp.conn.RemoteAddr(), err
+}
+
+// WriteTo writes to the underlying net.Conn.
+func (cp *packetConn) WriteTo(b []byte, _ net.Addr) (int, error) {
+	n, err := cp.conn.Write(b)
+	return n, err
+}
+
+// Close closes the underlying net.Conn.
+func (cp *packetConn) Close() error {
+	return cp.conn.Close()
+}
+
+// LocalAddr returns the local address of the underlying net.Conn.
+func (cp *packetConn) LocalAddr() net.Addr {
+	return cp.conn.LocalAddr()
+}
+
+// SetDeadline sets the deadline on the underlying net.Conn.
+func (cp *packetConn) SetDeadline(t time.Time) error {
+	return cp.conn.SetDeadline(t)
+}
+
+// SetReadDeadline sets the read deadline on the underlying net.Conn.
+func (cp *packetConn) SetReadDeadline(t time.Time) error {
+	return cp.conn.SetReadDeadline(t)
+}
+
+// SetWriteDeadline sets the write deadline on the underlying net.Conn.
+func (cp *packetConn) SetWriteDeadline(t time.Time) error {
+	return cp.conn.SetWriteDeadline(t)
+}
+
 // Dial creates a client connection to the given target.
 func Dial(target string, dtlsCfg *dtls.Config, opts ...udp.Option) (*udpClient.Conn, error) {
 	cfg := DefaultConfig
@@ -43,7 +91,7 @@ func Dial(target string, dtlsCfg *dtls.Config, opts ...udp.Option) (*udpClient.C
 		return nil, err
 	}
 
-	conn, err := dtls.Client(c, dtlsCfg)
+	conn, err := dtls.Client(FromConn(c), c.RemoteAddr(), dtlsCfg)
 	if err != nil {
 		return nil, err
 	}

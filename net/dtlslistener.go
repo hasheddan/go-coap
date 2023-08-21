@@ -9,9 +9,12 @@ import (
 	"time"
 
 	dtls "github.com/pion/dtls/v2"
+	dtlsnet "github.com/pion/dtls/v2/pkg/net"
+	"github.com/pion/dtls/v2/pkg/net/udp"
 	"github.com/pion/dtls/v2/pkg/protocol"
+	"github.com/pion/dtls/v2/pkg/protocol/extension"
+	"github.com/pion/dtls/v2/pkg/protocol/handshake"
 	"github.com/pion/dtls/v2/pkg/protocol/recordlayer"
-	"github.com/pion/transport/v2/udp"
 	"go.uber.org/atomic"
 )
 
@@ -35,7 +38,7 @@ type acceptedConn struct {
 
 // DTLSListener is a DTLS listener that provides accept with context.
 type DTLSListener struct {
-	listener         net.Listener
+	listener         dtlsnet.PacketListener
 	config           *dtls.Config
 	closed           atomic.Bool
 	goPool           GoPoolFunc
@@ -54,6 +57,46 @@ func tlsPacketFilter(packet []byte) bool {
 		return false
 	}
 	return h.ContentType == protocol.ContentTypeHandshake
+}
+
+func connResolver(packet []byte, raddr net.Addr) string {
+	pkts, err := recordlayer.UnpackDatagram(packet)
+	if err != nil || len(pkts) < 1 {
+		return raddr.String()
+	}
+	h := &recordlayer.Header{}
+	if err := h.Unmarshal(pkts[0]); err != nil {
+		return raddr.String()
+	}
+	if h.ContentType != protocol.ContentTypeConnectionID {
+		return raddr.String()
+	}
+	return string(h.ConnectionID)
+}
+
+func connIdentifier(packet []byte, raddr net.Addr) string {
+	pkts, err := recordlayer.UnpackDatagram(packet)
+	if err != nil || len(pkts) < 1 {
+		return raddr.String()
+	}
+	h := &recordlayer.Header{}
+	if err := h.Unmarshal(pkts[0]); err != nil {
+		return raddr.String()
+	}
+	if h.ContentType != protocol.ContentTypeHandshake {
+		return raddr.String()
+	}
+	sh := &handshake.MessageServerHello{}
+	if err := sh.Unmarshal(pkts[0]); err != nil {
+		return raddr.String()
+	}
+	for _, ext := range sh.Extensions {
+		switch e := ext.(type) {
+		case *extension.ConnectionID:
+			return string(e.CID)
+		}
+	}
+	return raddr.String()
 }
 
 // NewDTLSListener creates dtls listener.
@@ -95,6 +138,10 @@ func NewDTLSListener(network string, addr string, dtlsCfg *dtls.Config, opts ...
 	lc := udp.ListenConfig{
 		AcceptFilter: tlsPacketFilter,
 	}
+	if dtlsCfg.ConnectionIDGenerator != nil {
+		lc.ConnectionResolver = connResolver
+		lc.ConnectionIdentifier = connIdentifier
+	}
 	l.listener, err = lc.Listen(network, a)
 	if err != nil {
 		return nil, err
@@ -115,13 +162,13 @@ func (l *DTLSListener) send(conn net.Conn, err error) {
 }
 
 func (l *DTLSListener) accept() error {
-	c, err := l.listener.Accept()
+	c, raddr, err := l.listener.Accept()
 	if err != nil {
 		l.send(nil, err)
 		return err
 	}
 	err = l.goPool(func() {
-		l.send(dtls.Server(c, l.config))
+		l.send(dtls.Server(c, raddr, l.config))
 	})
 	if err != nil {
 		_ = c.Close()
